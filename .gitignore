@@ -1,0 +1,7 @@
+# CMake build output (holds absolute paths, so it is never portable)
+build/
+
+# Scratch .ioc variants used to derive the two projects
+_base/
+
+.DS_Store
