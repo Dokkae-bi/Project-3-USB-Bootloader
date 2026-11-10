@@ -233,8 +233,17 @@ int main(void)
       boot_jump_to_app();
     }
 
-    /* TODO (Requirement 4): pressing B1 in ST_WAIT or ST_WAIT_TIMEOUT should
-       take the same boot_jump_to_app() path, with no new image required. */
+    /* Requirement 4: B1 launches whatever is already installed, without a
+       transfer first. Only while the parser is idle - a half-sent header means
+       an update is in progress, not that the user wants out of it. */
+    if ((g_state == ST_WAIT || g_state == ST_WAIT_TIMEOUT) &&
+        g_proto.state == (uint8_t)BOOT_ST_MAGIC && boot_button_pressed()) {
+      if (boot_app_installed()) {
+        boot_jump_to_app();
+      } else {
+        g_state = ST_FAILED;   /* nothing valid in flash to launch */
+      }
+    }
 
     boot_status_led(now, g_state == ST_FAILED);
   }
