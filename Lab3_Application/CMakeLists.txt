@@ -74,3 +74,12 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
             $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin
     COMMENT "Generating raw binary ${CMAKE_PROJECT_NAME}.bin"
 )
+
+# The image is linked at 0x08010000, so SystemInit has to point VTOR there.
+# system_stm32l4xx.c is compiled into the CubeMX-generated STM32_Drivers object
+# library, not into ${CMAKE_PROJECT_NAME}, so the definitions have to go on that
+# target or SystemInit silently keeps VTOR at the bootloader's table.
+target_compile_definitions(STM32_Drivers PRIVATE
+    USER_VECT_TAB_ADDRESS
+    VECT_TAB_OFFSET=0x00010000
+)

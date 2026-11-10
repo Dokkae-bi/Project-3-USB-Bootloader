@@ -45,6 +45,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    Core/Src/boot_proto.c
+    Core/Src/boot_link.c
+    Core/Src/boot_image.c
 )
 
 # Add include paths

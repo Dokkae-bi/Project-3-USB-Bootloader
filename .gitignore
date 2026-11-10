@@ -4,4 +4,6 @@ build/
 # Scratch .ioc variants used to derive the two projects
 _base/
 
+.venv/
+
 .DS_Store

@@ -22,22 +22,30 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "boot_image.h"
+#include "boot_link.h"
+#include "boot_proto.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef enum {
+  ST_WAIT = 0,        /* entry window open, nothing arriving yet */
+  ST_WAIT_TIMEOUT,    /* window closed with no transfer */
+  ST_RECEIVING,       /* erased, taking payload */
+  ST_VERIFIED,        /* image written and checked, waiting for the button */
+  ST_FAILED           /* transfer or verification failed */
+} boot_state;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define APP_BASE_ADDR    0x08010000UL
-/* 0x08010000..0x080FFFFF is 480 x 2 KB pages. Page numbers are bank-relative
-   on this part: bank 1 holds 0x08000000..0x0807FFFF (pages 0-255) and bank 2
-   holds 0x08080000..0x080FFFFF (pages 0-255 again), so this region is bank 1
-   pages 32-255 plus bank 2 pages 0-255. */
-#define APP_PAGE_COUNT   480U
+#define ENTRY_WINDOW_MS   10000u   /* how long to sit waiting before booting the app */
+#define INTER_BYTE_MS      3000u   /* gap that means the host gave up */
+
+#define STATUS_READY       'R'
+#define STATUS_OK          'K'
+#define STATUS_FAIL        'E'
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,7 +57,12 @@
 UART_HandleTypeDef hlpuart1;
 
 /* USER CODE BEGIN PV */
-
+static boot_proto  g_proto;
+static boot_dw     g_dw;
+static boot_state  g_state;
+static uint32_t    g_addr;        /* next flash address to program */
+static uint32_t    g_window_start;
+static uint32_t    g_last_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,7 +75,68 @@ static void MX_LPUART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void transfer_fail(void)
+{
+  boot_flash_lock();
+  boot_led_write(0);
+  g_state = ST_FAILED;
+}
 
+static void start_receive(void)
+{
+  /* Requirement 2: the region has to be blank before anything is programmed. */
+  boot_led_write(1);
+
+  if (!boot_flash_unlock() || !boot_erase_app()) {
+    transfer_fail();
+    return;
+  }
+
+  g_addr = BOOT_APP_BASE;
+  boot_dw_init(&g_dw);
+  g_state = ST_RECEIVING;
+  g_last_byte = HAL_GetTick();
+
+  /* After the erase, so the host can tell the pause apart from a hang. */
+  (void)boot_link_send(STATUS_READY);
+}
+
+static void store_byte(uint8_t b)
+{
+  g_last_byte = HAL_GetTick();
+
+  if (boot_dw_push(&g_dw, b)) {
+    if (!boot_program_dw(g_addr, g_dw.buf)) {
+      transfer_fail();
+      return;
+    }
+    g_addr += 8u;
+  }
+}
+
+static void finish_receive(void)
+{
+  /* Tail of an image whose size is not a multiple of 8 still has to reach
+     flash, padded with 0xFF so the last double word is legal. */
+  if (boot_dw_pad(&g_dw)) {
+    if (!boot_program_dw(g_addr, g_dw.buf)) {
+      transfer_fail();
+      return;
+    }
+    g_addr += 8u;
+  }
+
+  boot_flash_lock();
+  boot_led_write(0);
+
+  if (boot_verify_crc(BOOT_APP_BASE, g_proto.length, g_proto.crc_expected)) {
+    g_state = ST_VERIFIED;
+    (void)boot_link_send(STATUS_OK);
+  } else {
+    g_state = ST_FAILED;
+    (void)boot_link_send(STATUS_FAIL);
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -97,9 +171,13 @@ int main(void)
   MX_LPUART1_UART_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  /* Requirement 1: decide how a transfer starts. Nothing arrives on its own
-     until the host opens the port and writes, so either time out and launch
-     the installed app, or wait for the button (Requirement 4). */
+  boot_link_init();
+  boot_proto_init(&g_proto);
+  boot_dw_init(&g_dw);
+  boot_led_write(0);
+
+  g_state = ST_WAIT;
+  g_window_start = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -109,19 +187,56 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Requirement 1: bytes land in CDC_Receive_FS() in
-       USB_DEVICE/App/usbd_cdc_if.c, not here. Move them into this loop through
-       a shared buffer + flag, or program flash straight from the callback.
-       Watch for a CDC_Transmit_FS() from here and the callback at the same
-       time - sharing the port that way is what wedges the endpoint. */
+    uint8_t  b;
+    uint32_t now;
 
-    /* Requirement 2: erase APP_BASE_ADDR's pages, then program one aligned
-       8-byte double word at a time as bytes accumulate. Pad the tail with
-       0xFF. Then VTOR = APP_BASE_ADDR, MSP = *(APP_BASE_ADDR), and branch to
-       *(APP_BASE_ADDR + 4). */
+    /* Requirement 1: bytes arrive in CDC_Receive_FS(), get pushed into the
+       ring there, and are drained here. Flash is never programmed from the
+       callback - it would block the USB interrupt for milliseconds. */
+    boot_link_service();
 
-    /* Requirement 4: B1 on PC13 pressed while waiting -> same handoff, with no
-       new image required. */
+    while (boot_link_pop(&b)) {
+      boot_evt ev = boot_proto_feed(&g_proto, b);
+
+      if (ev == BOOT_EVT_HEADER_OK) {
+        start_receive();
+      } else if (ev == BOOT_EVT_PAYLOAD || ev == BOOT_EVT_COMPLETE) {
+        if (g_state == ST_RECEIVING) {
+          store_byte(b);
+          if (ev == BOOT_EVT_COMPLETE && g_state == ST_RECEIVING) {
+            finish_receive();
+          }
+        }
+      }
+      /* BOOT_EVT_HEADER_BAD: the parser re-armed itself, keep waiting. */
+
+      if (g_state == ST_FAILED) {
+        break;
+      }
+    }
+
+    now = HAL_GetTick();
+
+    if (g_state == ST_RECEIVING && (now - g_last_byte) > INTER_BYTE_MS) {
+      transfer_fail();
+    }
+
+    if (g_state == ST_WAIT && (now - g_window_start) > ENTRY_WINDOW_MS) {
+      g_state = ST_WAIT_TIMEOUT;
+      if (boot_app_installed()) {
+        boot_jump_to_app();
+      }
+    }
+
+    /* Requirement 2: hand off to the image we just wrote. */
+    if (g_state == ST_VERIFIED && boot_button_pressed()) {
+      boot_jump_to_app();
+    }
+
+    /* TODO (Requirement 4): pressing B1 in ST_WAIT or ST_WAIT_TIMEOUT should
+       take the same boot_jump_to_app() path, with no new image required. */
+
+    boot_status_led(now, g_state == ST_FAILED);
   }
   /* USER CODE END 3 */
 }
