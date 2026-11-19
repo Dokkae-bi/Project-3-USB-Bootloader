@@ -95,6 +95,8 @@ void boot_jump_to_app(void)
     return;
   }
 
+  (void)HAL_RCC_DeInit();
+
   /* Take the bootloader's interrupts and clock out of the way before the
      application's Reset_Handler runs, or the old SysTick keeps firing into
      handlers that are no longer mapped. */
@@ -139,7 +141,6 @@ void boot_status_led(uint32_t now_ms, int faulting)
 
 int boot_button_pressed(void)
 {
-  /* The switch pulls PC13 to ground while it is held; the pull-up is on the
-     board, which is why MX_GPIO_Init leaves the pin as NOPULL. */
-  return HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET;
+  /* The switch pulls PC13 high while held; the board provides the pull-down. */
+  return HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET;
 }

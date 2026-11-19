@@ -133,7 +133,6 @@ static boot_evt feed_frame(boot_proto *p, uint32_t len, uint32_t crc,
   hdr[8] = (uint8_t)(crc);       hdr[9] = (uint8_t)(crc >> 8);
   hdr[10] = (uint8_t)(crc >> 16); hdr[11] = (uint8_t)(crc >> 24);
 
-  boot_proto_init(p);
   *accepted = 0;
   for (i = 0; i < BOOT_HEADER_LEN; i++) {
     ev = boot_proto_feed(p, hdr[i]);
@@ -154,6 +153,7 @@ static void test_parser(void)
   boot_evt ev;
 
   /* Clean frame. */
+  boot_proto_init(&p);
   ev = feed_frame(&p, 100u, 0xDEADBEEFu, 100u, &accepted);
   ok(ev == BOOT_EVT_COMPLETE, "full frame completes");
   ok(accepted == 100, "all payload bytes accepted");
@@ -161,9 +161,21 @@ static void test_parser(void)
   eq_u32(p.crc_expected, 0xDEADBEEFu, "crc parsed");
 
   /* One byte short never completes. */
+  boot_proto_init(&p);
   ev = feed_frame(&p, 100u, 0u, 99u, &accepted);
   ok(ev == BOOT_EVT_PAYLOAD, "short frame does not complete");
   ok(accepted == 99, "short frame counts 99");
+
+  /* The caller re-arms after handling a completed transfer, allowing another
+     frame to arrive without resetting the board. */
+  boot_proto_init(&p);
+  ev = feed_frame(&p, 8u, 0x11223344u, 8u, &accepted);
+  ok(ev == BOOT_EVT_COMPLETE, "first transfer completes");
+  ok(p.state == BOOT_ST_PAYLOAD, "completed parser awaits caller re-arm");
+  boot_proto_init(&p);
+  ev = feed_frame(&p, 8u, 0x55667788u, 8u, &accepted);
+  ok(ev == BOOT_EVT_COMPLETE, "second transfer completes after parser re-arm");
+  ok(accepted == 8, "second transfer payload counted");
 
   /* Wrong magic: header must be rejected, and the parser must re-arm so the
      NEXT good frame still works. */
@@ -187,6 +199,7 @@ static void test_parser(void)
   boot_proto_feed(&p, 'X');           /* breaks the magic here */
   ok(p.state == BOOT_ST_MAGIC, "broken magic stays in magic state");
 
+  boot_proto_init(&p);
   ev = feed_frame(&p, 8u, 0x11223344u, 8u, &accepted);
   ok(ev == BOOT_EVT_COMPLETE, "good frame accepted after junk magic");
   ok(accepted == 8, "good frame payload counted");
@@ -226,6 +239,7 @@ static void test_parser(void)
   }
 
   /* Exactly the region size is allowed. */
+  boot_proto_init(&p);
   ev = feed_frame(&p, (uint32_t)BOOT_APP_BYTES, 0u, 0u, &accepted);
   ok(ev == BOOT_EVT_HEADER_OK, "length == region size accepted");
 }

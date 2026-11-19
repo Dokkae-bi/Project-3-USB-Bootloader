@@ -80,6 +80,7 @@ static void transfer_fail(void)
   boot_flash_lock();
   boot_led_write(0);
   g_state = ST_FAILED;
+  boot_proto_init(&g_proto);
 }
 
 static void start_receive(void)
@@ -116,6 +117,8 @@ static void store_byte(uint8_t b)
 
 static void finish_receive(void)
 {
+  int verified;
+
   /* Tail of an image whose size is not a multiple of 8 still has to reach
      flash, padded with 0xFF so the last double word is legal. */
   if (boot_dw_pad(&g_dw)) {
@@ -129,7 +132,10 @@ static void finish_receive(void)
   boot_flash_lock();
   boot_led_write(0);
 
-  if (boot_verify_crc(BOOT_APP_BASE, g_proto.length, g_proto.crc_expected)) {
+  verified = boot_verify_crc(BOOT_APP_BASE, g_proto.length, g_proto.crc_expected);
+  boot_proto_init(&g_proto);
+
+  if (verified) {
     g_state = ST_VERIFIED;
     (void)boot_link_send(STATUS_OK);
   } else {
